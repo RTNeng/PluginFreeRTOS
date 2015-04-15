@@ -25,6 +25,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using VisualGDBExtensibility;
 
 namespace PluginFreeRTOS
@@ -87,7 +88,9 @@ namespace PluginFreeRTOS
                 string name = e.EvaluateRawExpression(string.Format("((TCB_t*)0x{0:x})->pcTaskName", currentTCB));
 
                 // Trim null characters (\000) and quotes from the name
-                name = name.Replace("\\000", "").Replace("\"", "");
+                Regex rgx = new Regex("\\\"(.*)\\\"(.*)");
+                name = name.Replace("\\000", "");
+                name = rgx.Replace(name, "$1");
 
                 // Add this thread to the list
                 threads.Add(new VirtualThread(CPUType, // CPU type
@@ -189,6 +192,11 @@ namespace PluginFreeRTOS
         {
             List<KeyValuePair<string, ulong>> result =
                 new List<KeyValuePair<string, ulong>>();
+            bool stackPadding = false;
+            UInt64 savedSPCache;
+
+            if (_IsRunning)
+                return null;
 
             // Saved register order for ARM Cortex processors:
             // ARM Cortex-M0 and Cortex-M3: r4-r11,r0-r3,r12,r14,r15,xPSR
@@ -247,12 +255,15 @@ namespace PluginFreeRTOS
                 ulong val = GetSavedRegister(stackPos + stackOffset);
                 result.Add(new KeyValuePair<string, ulong>(registers2[stackPos],
                                                            val));
+
+                if (registers2[stackPos] == "cpsr")
+                    // Check if xPSR bit 9 is set, which indicates a 4-byte
+                    // padding word was pushed on the stack pointer
+                    if ((val & 0x100) != 0)
+                        stackPadding = true;
             }
 
             stackOffset += 8;
-
-            // Add the stack pointer
-            result.Add(new KeyValuePair<string, ulong>("r13", _SavedSP));
 
             if (_CPUType == CPUTypes.CPU_ARM_CORTEX_M4)
             {
@@ -266,8 +277,22 @@ namespace PluginFreeRTOS
                         ulong val = GetSavedRegister(sReg + stackOffset);
                         result.Add(new KeyValuePair<string, ulong>("s" + sReg, val));
                     }
+
+                    stackOffset += 16;
                 }
             }
+
+            // Update the stack pointer, accounting for the registers stacked
+            // (by software and hardware) when the PendSV IRQ handler was called
+            savedSPCache = _SavedSP + (ulong)(4 * stackOffset);
+
+            // Account for padding in the stack, if it occurred in this case
+            if (stackPadding)
+            {
+                savedSPCache += 4;
+            }
+
+            result.Add(new KeyValuePair<string, ulong>("r13", savedSPCache));
 
             return result;
         }
